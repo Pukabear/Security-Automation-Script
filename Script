@@ -1,0 +1,96 @@
+import os
+import re
+import time
+import requests
+from scapy.all import ARP, Ether, srp
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# Configuration from environment variables
+NETWORK = os.getenv("NETWORK", "192.168.1.0/24")
+LOG_FILE_PATH = os.getenv("LOG_FILE_PATH", "/var/log/syslog")
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "http://your-alert-system.com/webhook")
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 3600))
+LOG_CHECK_INTERVAL = int(os.getenv("LOG_CHECK_INTERVAL", 60))
+
+# Function to perform network scan
+def network_scan():
+    print("Starting network scan...")
+    arp_request = ARP(pdst=NETWORK)
+    broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
+    arp_request_broadcast = broadcast/arp_request
+    answered_list = srp(arp_request_broadcast, timeout=1, verbose=False)[0]
+
+    devices = []
+    for element in answered_list:
+        devices.append({'IP': element[1].psrc, 'MAC': element[1].hwsrc})
+
+    print("Network scan completed.")
+    return devices
+
+# Function to analyze log file
+def analyze_logs(log_file_path):
+    print("Analyzing log file...")
+    suspicious_patterns = [
+        r"Failed password",
+        r"unauthorized access",
+    ]
+
+    with open(log_file_path, 'r') as file:
+        logs = file.read()
+
+    incidents = []
+    for pattern in suspicious_patterns:
+        matches = re.findall(pattern, logs, re.IGNORECASE)
+        if matches:
+            incidents.extend(matches)
+
+    print("Log analysis completed.")
+    return incidents
+
+# Function to send alert
+def send_alert(message):
+    payload = {'text': message}
+    try:
+        response = requests.post(ALERT_WEBHOOK_URL, json=payload)
+        response.raise_for_status()
+        print("Alert sent successfully.")
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending alert: {e}")
+
+# Event handler for log file changes
+class LogFileEventHandler(FileSystemEventHandler):
+    def on_modified(self, event):
+        if event.src_path == LOG_FILE_PATH:
+            incidents = analyze_logs(LOG_FILE_PATH)
+            if incidents:
+                send_alert(f"Suspicious activity detected: {', '.join(incidents)}")
+
+def main():
+    # Start network scan
+    devices = network_scan()
+    print(f"Detected devices: {devices}")
+
+    # Start log file monitoring
+    event_handler = LogFileEventHandler()
+    observer = Observer()
+    observer.schedule(event_handler, path=os.path.dirname(LOG_FILE_PATH), recursive=False)
+    observer.start()
+
+    try:
+        while True:
+            time.sleep(SCAN_INTERVAL)
+            devices = network_scan()
+            print(f"Detected devices: {devices}")
+
+            incidents = analyze_logs(LOG_FILE_PATH)
+            if incidents:
+                send_alert(f"Suspicious activity detected: {', '.join(incidents)}")
+
+            time.sleep(LOG_CHECK_INTERVAL)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
+
+if __name__ == "__main__":
+    main()
